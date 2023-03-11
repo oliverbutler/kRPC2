@@ -4,77 +4,227 @@ using SpaceWarp.API.Mods;
 using SpaceWarp.API.Assets;
 using KSP.UI.Binding;
 using KSP.Sim.impl;
+using KSP.Game;
 using SpaceWarp;
 using SpaceWarp.API.UI;
 using SpaceWarp.API.UI.Appbar;
 using UnityEngine;
+using System;
+using WebSocketSharp;
+using WebSocketSharp.Server;
+using System.Net;
+using System.Threading;
+using KSP.Api;
+using HarmonyLib.Tools;
+using System.Net.WebSockets;
+using Newtonsoft.Json.Linq;
+using System.Dynamic;
+using System.Collections.Concurrent;
+using System.Collections.Generic;
 
 namespace ExampleMod;
 
+public class CommandService : WebSocketBehavior
+{
+
+    public event EventHandler<string> OnCommandRecieved;
+
+    protected override void OnMessage(MessageEventArgs e)
+    { 
+        Console.Write("Emit: " + e.Data);
+        OnCommandRecieved?.Invoke(this, e.Data);
+
+    }
+
+
+
+    /* private double? getAltitude()
+     {
+         if (Game.GlobalGameState.GetState() != KSP.Game.GameState.FlightView)
+         {
+             return null;
+         }
+
+         VesselComponent _activeVessel = Game.ViewController.GetActiveSimVessel();
+
+         if (_activeVessel == null)
+         {
+             return null;
+         }
+
+         return _activeVessel.AltitudeFromSeaLevel;
+
+
+     }
+
+     private void enableSas()
+     {
+         if (Game.GlobalGameState.GetState() != KSP.Game.GameState.FlightView)
+         {
+             return;
+         }
+
+         VesselComponent _activeVessel = Game.ViewController.GetActiveSimVessel();
+
+         if (_activeVessel == null)
+         {
+             return;
+         }
+
+         _activeVessel.SetAutopilotEnableDisable(true);
+     }
+
+     private void targetHeading()
+     {
+         if (Game.GlobalGameState.GetState() != KSP.Game.GameState.FlightView)
+         {
+             return;
+         }
+
+         VesselComponent _activeVessel = Game.ViewController.GetActiveSimVessel();
+
+         if (_activeVessel == null)
+         {
+             return;
+         }
+
+         var sas = _activeVessel.Autopilot.SAS;
+
+         // Make a Quaternion to point up
+
+         _activeVessel.SetAutopilotMode(KSP.Sim.AutopilotMode.Autopilot);
+
+
+         var target = new Vector3(x, y, z);
+
+         sas.SetTargetOrientation(new KSP.Sim.Vector(sas.ReferenceFrame, target), false);
+
+     }*/
+}
+
 [BepInPlugin("com.SpaceWarpAuthorName.ExampleMod", "ExampleMod", "3.0.0")]
 [BepInDependency(SpaceWarpPlugin.ModGuid, SpaceWarpPlugin.ModVer)]
-public class ExampleMod : BaseSpaceWarpPlugin
+public class ExampleMod : BaseSpaceWarpPlugin 
 {
 
     private bool drawUI;
     private Rect windowRect;
 
+    public event EventHandler<string> ResponseEvent;
+
+    private HttpServer server;
+
+    static HashSet<string> watchList = new HashSet<string>();
+
+
+
+    private void OnCommandRecieve(object sender, string command)
+    {
+
+        if (Game.GlobalGameState.GetState() != KSP.Game.GameState.FlightView)
+         {
+             return;
+         }
+
+         VesselComponent _activeVessel = Game.ViewController.GetActiveSimVessel();
+
+         if (_activeVessel == null)
+         {
+             return;
+         }
+
+        dynamic payload = JObject.Parse(command);
+
+        string type = payload.type;
+
+        if(type == "watch")
+        {
+
+            var add_watch = payload.data.ToObject<List<string>>();
+
+            for(int i = 0; i < add_watch.Count; i++)
+            {
+                watchList.Add(add_watch[i]);
+            }
+            
+
+           
+        }
+
+
+        if(type == "sas")
+        {
+            bool enable = payload.data.enable;
+
+            _activeVessel.SetAutopilotEnableDisable(enable);
+
+        }
+
+        if(type == "setThrottle")
+        {
+            float throttle = payload.data.throttle;
+
+            GameManager.Instance.Game.ViewController.flightInputHandler.OverrideInputThrottle(throttle);
+        }
+
+    }
+
+
+
     private static ExampleMod Instance { get; set; }
 
-    /// <summary>
-    /// A method that is called when the mod is initialized.
-    /// It loads the mod's GUI skin, registers the mod's button on the SpaceWarp application bar, and sets the singleton instance of the mod.
-    /// </summary>
+    private CommandService CommandService { get; set; }
+
+
     public override void OnInitialized()
     {
         base.OnInitialized();
         Instance = this;
 
-        // Example of using the logger, Were going to log a message to the console, ALT + C to open the console.
-        Logger.LogInfo("Hello World, Im a spacewarp Mod.");
+        Logger.LogInfo("kRPC > Started!");
 
 
-        // Register the mod's button in KSP 2s app.bar
-        // This requires an `icon.png` file to exist under [plugin_folder]/assets/images
+        server = new HttpServer(IPAddress.Parse("0.0.0.0"), 6674);
+
+        server.AddWebSocketService<CommandService>("/ws", s =>
+        {
+            CommandService = s;
+            CommandService.OnCommandRecieved += OnCommandRecieve;
+        });
+
+        server.Start();
+
+        if (server.IsListening)
+        {
+            Logger.LogInfo(string.Format("kRPC > Listening on port {0}, and providing WebSocket services:", server.Port));
+        }
+
+
         Appbar.RegisterAppButton(
-            "Example Mod",
-            "BTN-ExampleMod",
-            // Example of using the asset loader, were going to load the apps icon
-            // Path format [mod_id]/images/filename
-            // for bundles its [mod_id]/[bundle_name]/[path to file in bundle with out assets/bundle]/filename.extension
-            // There is also a try get asset function, that returns a bool on whether or not it could grab the asset
-            AssetManager.GetAsset<Texture2D>($"{SpaceWarpMetadata.ModID}/images/icon.png"),
-            ToggleButton
-        );
+                "Example Mod",
+                "BTN-ExampleMod",
+                AssetManager.GetAsset<Texture2D>($"{SpaceWarpMetadata.ModID}/images/icon.png"),
+                ToggleButton
+            );
     }
 
-    /// <summary>
-    /// A method that is called when the mod's button on the SpaceWarp application bar is clicked.
-    /// It toggles the <see cref="drawUI"/> flag and updates the button's state.
-    /// </summary>
-    /// <param name="toggle">The new state of the button.</param>
     private void ToggleButton(bool toggle)
     {
         drawUI = toggle;
         GameObject.Find("BTN-ExampleMod")?.GetComponent<UIValue_WriteBool_Toggle>()?.SetValue(toggle);
     }
 
-    /// <summary>
-    /// A method that is called to draw the mod's GUI.
-    /// It sets the GUI skin to the SpaceWarp GUI skin and draws the mod's window if the
-    /// <see cref="drawUI"/> flag is true.
-    /// </summary>
     public void OnGUI()
     {
-        // Set the GUI skin to the SpaceWarp GUI skin.
         GUI.skin = Skins.ConsoleSkin;
+
 
         if (drawUI)
         {
             windowRect = GUILayout.Window(
                 GUIUtility.GetControlID(FocusType.Passive),
                 windowRect,
-                FillWindow, // The method we call. 
+                FillWindow, 
                 "Window Header",
                 GUILayout.Height(350),
                 GUILayout.Width(350)
@@ -82,61 +232,81 @@ public class ExampleMod : BaseSpaceWarpPlugin
         }
     }
 
-    /// <summary>
-    /// A method that is called to draw the contents of the mod's GUI window.
-    /// </summary>
-    /// <param name="windowID">The ID of the GUI window.</param>
-    private static void FillWindow(int windowID)
+    private void FillWindow(int windowID)
     {
-        GUILayout.Label("Example Mod - Built with Space-Warp");
+        GUILayout.Label($"{lastUpdateTime}");
         GUI.DragWindow(new Rect(0, 0, 10000, 500));
+
+
     }
     
     private float lastUpdateTime = 0.0f;
-    private float updateInterval = 1.0f;
+    private float updateInterval = 0.1f;
 
-    /// <summary>
-    /// Runs every frame and performs various tasks based on the game state.
-    /// </summary>
     private void LateUpdate()
     {
-        // Now lets play with some Game objects
-        // Check if the specified interval has elapsed
         if (Time.time - lastUpdateTime >= updateInterval)
         {
-            // Update the last update time to the current time
             lastUpdateTime = Time.time;
 
-            // Now lets play with some Game objects
-            if (Game.GlobalGameState.GetState() == KSP.Game.GameState.MainMenu)
+            if (Game.GlobalGameState.GetState() != KSP.Game.GameState.FlightView)
             {
-                Logger.Log(LogLevel.None, "This is log level none");
-                Logger.Log(LogLevel.Debug, "This is log level debug");
-                Logger.Log(LogLevel.Info, "This is log level info");
-                Logger.Log(LogLevel.Warning, "This is log level warning");
-                Logger.Log(LogLevel.Error, "This is log level error");
-                Logger.Log(LogLevel.Fatal, "This is log level fatal");
-                Logger.Log(LogLevel.Message, "This is log level message");
-                Logger.Log(LogLevel.All, "This is log level all");
+                return;
+            }
 
-                KSP.Audio.KSPAudioEventManager.SetMasterVolume(Mathf.Sin(Time.time) * 100);
-            }
-        }
-        else if (Game.GlobalGameState.GetState() == KSP.Game.GameState.FlightView)
-        {
-            // Getting the active vessel, staging it over and over and printing out all the parts. 
             VesselComponent _activeVessel = Game.ViewController.GetActiveSimVessel();
-            
-            if (_activeVessel != null)
+
+            if (_activeVessel == null)
             {
-                _activeVessel.ActivateNextStage();
-                Logger.LogWarning("Stagin Active Vessel: " + _activeVessel.Name);
-                VesselBehavior behavior = Game.ViewController.GetBehaviorIfLoaded(_activeVessel);
-                foreach (PartBehavior pb in behavior.parts)
-                {
-                    Logger.LogWarning(pb.name);
-                }
+                return;
             }
+
+            foreach (string watch in watchList) {
+
+            
+                if(watch == "altitude")
+                {
+
+                    var altitude = _activeVessel.AltitudeFromSeaLevel;
+
+                    var jsonResponse = new JObject();
+
+                    jsonResponse["type"] = "altitude";
+                    jsonResponse["data"] = altitude;
+
+                    server.WebSocketServices["/ws"].Sessions.Broadcast(jsonResponse.ToString());
+
+                }
+
+                if(watch == "sas")
+                {
+                    var enabled = _activeVessel.Autopilot._isEnabled;
+
+                    var jsonResponse = new JObject();
+
+                    jsonResponse["type"] = "sas";
+                    jsonResponse["data"] = enabled;
+
+                    server.WebSocketServices["/ws"].Sessions.Broadcast(jsonResponse.ToString());
+                }
+
+                if(watch == "throttle")
+                {
+                    float throttle = GameManager.Instance.Game.ViewController.flightInputHandler._inputThrottle;
+
+                    var jsonResponse = new JObject();
+
+                    jsonResponse["type"] = "throttle";
+                    jsonResponse["data"] = throttle;
+
+                    server.WebSocketServices["/ws"].Sessions.Broadcast(jsonResponse.ToString());
+                }
+
+            }
+         
+
         }
     }
+
+   
 }
